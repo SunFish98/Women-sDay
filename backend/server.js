@@ -8,6 +8,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
 const PROVIDER = process.env.LLM_PROVIDER || 'gemini'; // 'gemini' or 'claude'
+const ALLOWED_GEMINI_MODELS = [
+  'gemini-3-pro-preview',
+  'gemini-3-flash-preview',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+];
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
+const DEFAULT_GEMINI_MODEL = ALLOWED_GEMINI_MODELS.includes(GEMINI_MODEL)
+  ? GEMINI_MODEL
+  : 'gemini-2.5-flash';
 
 app.use(cors());
 app.use(express.json());
@@ -190,17 +202,28 @@ const SYSTEM_PROMPT = `你是一位充满智慧与慈悲的女性导师匹配者
   "wisdom_tags": ["标签1", "标签2", "标签3"]
 }`;
 
-async function callGemini(problem) {
+function resolveGeminiModel(requestedModel) {
+  if (typeof requestedModel === 'string' && ALLOWED_GEMINI_MODELS.includes(requestedModel)) {
+    return requestedModel;
+  }
+  return DEFAULT_GEMINI_MODEL;
+}
+
+async function callGemini(problem, modelName = DEFAULT_GEMINI_MODEL) {
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash-preview-04-17',
+    model: modelName,
     systemInstruction: SYSTEM_PROMPT,
   });
 
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: `今天是国际妇女节。一位现代女性的困境是："${problem}"\n\n请为她匹配最合适的历史女性导师，用那位导师的声音给予她智慧与力量。` }] }],
-    generationConfig: { temperature: 0.8, maxOutputTokens: 900 },
+    generationConfig: {
+      temperature: 0.8,
+      maxOutputTokens: 900,
+      responseMimeType: 'application/json',
+    },
   });
 
   return result.response.text();
@@ -211,7 +234,7 @@ async function callClaude(problem) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   const msg = await client.messages.create({
-    model: 'claude-opus-4-6',
+    model: CLAUDE_MODEL,
     max_tokens: 900,
     temperature: 0.8,
     system: SYSTEM_PROMPT,
@@ -221,10 +244,74 @@ async function callClaude(problem) {
   return msg.content[0].text;
 }
 
+function extractFirstJSONObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') depth++;
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function removeTrailingCommas(jsonText) {
+  return jsonText.replace(/,\s*([}\]])/g, '$1');
+}
+
 function parseJSON(text) {
   // Strip markdown code fences if present
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const extracted = extractFirstJSONObject(cleaned);
+    if (!extracted) throw new Error('No JSON object found in model output');
+    try {
+      return JSON.parse(extracted);
+    } catch {
+      return JSON.parse(removeTrailingCommas(extracted));
+    }
+  }
+}
+
+function getProviderHint(errMessage = '') {
+  const msg = String(errMessage).toLowerCase();
+  if (!msg) return '请检查 API Key、模型名与网络连接';
+  if (msg.includes('api key') || msg.includes('unauthorized') || msg.includes('permission') || msg.includes('forbidden')) {
+    return 'API Key 无效或权限不足，请检查 .env 的 Key 与项目配额';
+  }
+  if (msg.includes('model') && (msg.includes('not found') || msg.includes('invalid'))) {
+    return '模型名不可用，请检查 .env 中 GEMINI_MODEL / CLAUDE_MODEL';
+  }
+  if (msg.includes('quota') || msg.includes('rate') || msg.includes('429')) {
+    return '调用额度不足或触发限流，请稍后重试或提升配额';
+  }
+  return '请检查 API Key、模型名与网络连接';
 }
 
 const REQUIRED_FIELDS = ['name', 'name_en', 'era', 'avatar_emoji', 'avatar_color', 'quote', 'quote_attribution', 'personal_advice', 'wisdom_tags'];
@@ -235,7 +322,7 @@ app.post('/api/match', async (req, res) => {
     return res.status(429).json({ error: '请求太频繁，请稍后再试' });
   }
 
-  const { problem } = req.body;
+  const { problem, gemini_model: requestedGeminiModel } = req.body;
   if (!problem || typeof problem !== 'string') {
     return res.status(400).json({ error: '请输入你的困境' });
   }
@@ -244,12 +331,20 @@ app.post('/api/match', async (req, res) => {
     return res.status(400).json({ error: '请输入 5-300 字的内容' });
   }
 
+  const selectedGeminiModel = resolveGeminiModel(requestedGeminiModel);
+
   let rawText;
   try {
-    rawText = PROVIDER === 'claude' ? await callClaude(trimmed) : await callGemini(trimmed);
+    rawText = PROVIDER === 'claude'
+      ? await callClaude(trimmed)
+      : await callGemini(trimmed, selectedGeminiModel);
   } catch (err) {
     console.error('LLM error:', err.message);
-    return res.status(502).json({ error: 'AI 服务暂时不可用，请稍后重试' });
+    return res.status(502).json({
+      error: 'AI 服务暂时不可用，请稍后重试',
+      hint: getProviderHint(err.message),
+      provider: PROVIDER,
+    });
   }
 
   let data;
@@ -258,11 +353,17 @@ app.post('/api/match', async (req, res) => {
   } catch {
     // Retry once
     try {
-      rawText = PROVIDER === 'claude' ? await callClaude(trimmed) : await callGemini(trimmed);
+      rawText = PROVIDER === 'claude'
+        ? await callClaude(trimmed)
+        : await callGemini(trimmed, selectedGeminiModel);
       data = parseJSON(rawText);
     } catch (err) {
       console.error('JSON parse error:', rawText);
-      return res.status(500).json({ error: '解析结果失败，请重试' });
+      return res.status(500).json({
+        error: '解析结果失败，请重试',
+        hint: '模型返回格式不稳定，已自动重试。请再次提交一次；若持续失败可切换 LLM_PROVIDER',
+        provider: PROVIDER,
+      });
     }
   }
 
@@ -275,10 +376,25 @@ app.post('/api/match', async (req, res) => {
   res.json({ success: true, data });
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, provider: PROVIDER }));
+app.get('/health', (_, res) => res.json({
+  ok: true,
+  provider: PROVIDER,
+  gemini_default_model: DEFAULT_GEMINI_MODEL,
+  gemini_allowed_models: ALLOWED_GEMINI_MODELS,
+}));
 
 app.listen(PORT, () => {
   console.log(`\n🌸 历史女性导师匹配器 启动成功`);
   console.log(`   访问地址: http://localhost:${PORT}`);
-  console.log(`   AI 模型: ${PROVIDER === 'gemini' ? 'gemini-2.5-flash-preview-04-17' : 'claude-opus-4-6'}\n`);
+  console.log(`   AI 模型: ${PROVIDER === 'gemini' ? DEFAULT_GEMINI_MODEL : CLAUDE_MODEL}`);
+  if (PROVIDER === 'gemini') {
+    console.log(`   可选 Gemini 模型: ${ALLOWED_GEMINI_MODELS.join(', ')}`);
+  }
+  if (PROVIDER === 'gemini' && !process.env.GEMINI_API_KEY) {
+    console.log('   ⚠ 缺少 GEMINI_API_KEY');
+  }
+  if (PROVIDER === 'claude' && !process.env.ANTHROPIC_API_KEY) {
+    console.log('   ⚠ 缺少 ANTHROPIC_API_KEY');
+  }
+  console.log('');
 });
