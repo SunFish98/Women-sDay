@@ -3,3 +3,4 @@ backend/.env
 .env
 *.png
 .DS_Store
+.Rhistory
