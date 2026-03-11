@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { getProfileByName, getProfileCount, syncWikipediaProfiles } from './wikiProfiles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -39,6 +40,13 @@ function rateLimit(ip, limit = 20, windowMs = 60000) {
   return entry.count <= limit;
 }
 
+
+if (getProfileCount() === 0) {
+  console.log('📚 Wikipedia 人物数据库为空，开始初始化...');
+  syncWikipediaProfiles()
+    .then(({ success, total }) => console.log(`📚 Wikipedia 人物数据库初始化完成: ${success}/${total}`))
+    .catch((err) => console.error('Wikipedia 初始化失败:', err.message));
+}
 const SYSTEM_PROMPT = `你是一位充满智慧与慈悲的女性导师匹配者。当一位现代女性向你倾诉她的职场或生活困境时，你要从古今最具影响力的100位女性中，选出与她处境最有精神共鸣的那一位，并用那位女性的声音给予她力量与建议。
 
 候选人物池（100位，从中选择最合适的一位）：
@@ -373,6 +381,14 @@ app.post('/api/match', async (req, res) => {
     }
   }
 
+  const profile = getProfileByName(data.name) || getProfileByName(data.name_en);
+  if (profile) {
+    data.wikipedia_summary = profile.summary;
+    data.wikipedia_story = profile.extract;
+    data.wikipedia_url = profile.wiki_url;
+    data.wikipedia_image = profile.image_url;
+  }
+
   res.json({ success: true, data });
 });
 
@@ -381,6 +397,7 @@ app.get('/health', (_, res) => res.json({
   provider: PROVIDER,
   gemini_default_model: DEFAULT_GEMINI_MODEL,
   gemini_allowed_models: ALLOWED_GEMINI_MODELS,
+  profile_count: getProfileCount(),
 }));
 
 app.listen(PORT, () => {

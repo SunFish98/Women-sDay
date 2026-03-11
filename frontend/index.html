@@ -410,6 +410,30 @@
       width: 100%;
     }
 
+
+    .history-block {
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid #EADCF5;
+      border-radius: 10px;
+      background: #FCF8FF;
+    }
+
+    .history-title {
+      font-size: 0.72rem;
+      color: var(--purple-mid);
+      margin-bottom: 6px;
+      letter-spacing: 0.5px;
+    }
+
+    .history-text {
+      font-size: 0.78rem;
+      line-height: 1.6;
+      color: var(--text-mid);
+      white-space: pre-line;
+    }
+
     .tags-row {
       display: flex;
       gap: 8px;
@@ -601,6 +625,11 @@
         <div class="advice-label">✦ 她对你说</div>
         <div class="advice-text" id="card-advice">建议内容</div>
 
+        <div class="history-block" id="history-block" style="display:none;">
+          <div class="history-title">📚 来自 Wikipedia 的人物故事</div>
+          <div class="history-text" id="card-history"></div>
+        </div>
+
         <div class="tags-row" id="card-tags"></div>
       </div>
       <div class="card-footer">
@@ -685,6 +714,16 @@
       document.getElementById('card-quote').textContent = data.quote;
       document.getElementById('card-quote-attr').textContent = data.quote_attribution;
       document.getElementById('card-advice').textContent = data.personal_advice;
+
+      const historyBlock = document.getElementById('history-block');
+      const historyText = document.getElementById('card-history');
+      if (data.wikipedia_story) {
+        historyText.textContent = `${data.wikipedia_story}${data.wikipedia_url ? `\n来源：${data.wikipedia_url}` : ''}`;
+        historyBlock.style.display = 'block';
+      } else {
+        historyBlock.style.display = 'none';
+        historyText.textContent = '';
+      }
 
       const tagsRow = document.getElementById('card-tags');
       tagsRow.innerHTML = '';
